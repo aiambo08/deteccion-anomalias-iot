@@ -6,11 +6,15 @@ __pycache__/
 dist/
 build/
 .eggs/
+# uv cache directory (not the lock file — uv.lock SHOULD be committed)
+.uv/
 *.log
 *.pkl
 *.h5
 *.json
 !docker/docker-compose.yml
+!pyproject.toml
+!uv.lock
 *.npy
 data/raw/
 data/processed/

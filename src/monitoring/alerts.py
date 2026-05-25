@@ -45,7 +45,7 @@ def log_drift_report(report: dict, report_dir: str = "logs/drift_reports") -> st
         Path to the saved report file.
     """
     os.makedirs(report_dir, exist_ok=True)
-    fname = f"drift_{report.get('week', 'unknown')}_{datetime.now().strftime('%H%M%S')}.json"
+    fname = f"drift_report_{report.get('week', 'unknown')}_{datetime.now().strftime('%H%M%S')}.json"
     path  = os.path.join(report_dir, fname)
 
     # PSI results may contain non-serialisable numpy floats — normalise

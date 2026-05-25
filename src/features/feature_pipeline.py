@@ -49,23 +49,35 @@ def build_feature_matrix(
     X: np.ndarray,
     verbose: bool = True,
     save_path: Optional[str] = None,
+    n_jobs: int = 1,
 ) -> np.ndarray:
     """Build the full feature matrix for a dataset split.
 
     Args:
         X: (N, T, F) sequence array.
-        verbose: Whether to show a tqdm progress bar.
+        verbose: Whether to show a tqdm progress bar (only in single-job mode).
         save_path: If provided, save the resulting matrix as .npy.
+        n_jobs: Number of parallel jobs for feature extraction.
+            ``1``  = sequential (default, safe everywhere).
+            ``-1`` = use all available CPU cores (recommended for large datasets).
 
     Returns:
         features: (N, 1050) float32 array.
     """
     n = len(X)
-    features = np.zeros((n, FEATURE_DIM), dtype=np.float32)
 
-    iterator = tqdm(range(n), desc="Extracting features") if verbose else range(n)
-    for i in iterator:
-        features[i] = extract_advanced_features(X[i])
+    if n_jobs != 1:
+        # Parallel extraction — faster for large N, but disables progress bar
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(extract_advanced_features)(X[i]) for i in range(n)
+        )
+        features = np.array(results, dtype=np.float32)
+    else:
+        features = np.zeros((n, FEATURE_DIM), dtype=np.float32)
+        iterator = tqdm(range(n), desc="Extracting features") if verbose else range(n)
+        for i in iterator:
+            features[i] = extract_advanced_features(X[i])
 
     if save_path is not None:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -73,6 +85,7 @@ def build_feature_matrix(
         print(f"  Features saved → {save_path}  {features.shape}")
 
     return features
+
 
 
 # ---------------------------------------------------------------------------

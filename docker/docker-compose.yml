@@ -11,13 +11,15 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
-  # ── Kafka broker ────────────────────────────────────────────────────────
+  # ── Kafka broker ─────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: iot_kafka
@@ -37,13 +39,16 @@ services:
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
       KAFKA_LOG_RETENTION_HOURS: 168     # 7 days for sensor data
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    restart: unless-stopped
     healthcheck:
+      # Wait until the broker is fully initialised and accepting connections
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 15s
       timeout: 10s
       retries: 10
+      start_period: 30s   # give Kafka time to start before first probe
 
-  # ── FastAPI anomaly detection service ───────────────────────────────────
+  # ── FastAPI anomaly detection service ────────────────────────────────────
   api:
     build:
       context: ..
@@ -54,18 +59,27 @@ services:
     volumes:
       - ../models:/app/models:ro    # read-only model artefacts
       - ../logs:/app/logs
+      - ../data:/app/data:ro
     environment:
-      MODEL_PATH:     /app/models/bilstm_autoencoder.h5
-      SCALER_PATH:    /app/models/scaler.pkl
-      THRESHOLD_PATH: /app/models/threshold.pkl
+      MODEL_PATH:      /app/models/bilstm_autoencoder.h5
+      XGB_PATH:        /app/models/xgboost_baseline.json
+      SCALER_PATH:     /app/models/scaler.pkl
+      THRESHOLD_PATH:  /app/models/threshold.pkl
+      ALERTS_DB_PATH:  /app/logs/alerts.db
+      MAX_ALERTS:      "10000"
+      # Restrict CORS in production: ALLOWED_ORIGINS=https://yourdomain.com
+      ALLOWED_ORIGINS: "*"
+      # Set a strong secret in production via Docker secrets / CI vars
+      ADMIN_API_KEY:   "${ADMIN_API_KEY:-changeme-in-production}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 20s
       timeout: 5s
       retries: 5
+      start_period: 40s
     restart: unless-stopped
 
-  # ── Kafka anomaly detector consumer ─────────────────────────────────────
+  # ── Kafka anomaly detector consumer ──────────────────────────────────────
   consumer:
     build:
       context: ..
@@ -84,7 +98,7 @@ services:
     command: python -m src.streaming.consumer
     restart: unless-stopped
 
-  # ── Sensor data simulator (producer) ────────────────────────────────────
+  # ── Sensor data simulator (producer) ─────────────────────────────────────
   producer:
     build:
       context: ..
@@ -97,3 +111,23 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
     command: python -m src.streaming.producer
     restart: on-failure
+
+  # ── MLOps Retraining Executor ─────────────────────────────────────────────
+  retrain_executor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.retrain
+    container_name: iot_retrain_executor
+    depends_on:
+      api:
+        condition: service_healthy   # only start once the API (and models) are ready
+    volumes:
+      # Read-write access: executor needs to write new model artefacts
+      - ../models:/app/models
+      - ../logs:/app/logs
+      - ../data:/app/data:ro
+    environment:
+      PYTHONUNBUFFERED:  "1"
+      MAX_RETRAIN_HOURS: "6"
+    command: python -m src.monitoring.retrain_executor --watch
+    restart: unless-stopped

@@ -1,18 +1,22 @@
 FROM python:3.10-slim
 
+# ── Install uv ────────────────────────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Install Python dependencies ───────────────────────────────────────────────
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
-COPY setup.py .
+# ── Copy project source and install in editable mode ─────────────────────────
+COPY setup.py pyproject.toml ./
 COPY src/ ./src/
+RUN uv pip install --system --no-cache -e . --no-deps
 
-RUN pip install -e . --no-deps
-
-# Default: run consumer. Override CMD for producer.
+# Default: run consumer. Override CMD for producer or retrain_executor.
 CMD ["python", "-m", "src.streaming.consumer"]

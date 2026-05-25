@@ -1,31 +1,24 @@
 FROM python:3.10-slim
 
 # ── Install uv ────────────────────────────────────────────────────────────────
-# Copies the pre-built uv binary from the official image — no curl, no pip bootstrap.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# System deps required to compile native extensions (TensorFlow, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install Python dependencies ───────────────────────────────────────────────
-# Copy only the dependency manifests first (maximises Docker layer cache hits).
 COPY requirements.txt .
-
-# --system  : install into the system Python, not a venv (standard for containers)
-# --no-cache: keeps the layer lean — uv's global cache is not needed here
 RUN uv pip install --system --no-cache -r requirements.txt
 
 # ── Copy project source and install in editable mode ─────────────────────────
 COPY setup.py pyproject.toml ./
 COPY src/ ./src/
-
-# Editable install so `from src.*` imports resolve correctly at runtime.
 RUN uv pip install --system --no-cache -e . --no-deps
 
-EXPOSE 8000
+# Ensure log + model directories exist at build time
+RUN mkdir -p logs/drift_reports logs/retrain_reports models/archive
 
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["python", "-m", "src.monitoring.retrain_executor", "--watch"]

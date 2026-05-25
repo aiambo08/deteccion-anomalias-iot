@@ -74,17 +74,36 @@ class SensorProducer:
     ) -> None:
         """Continuously publish synthetic sensor readings.
 
+        Each step advances all sensors by one timestep.  When a sensor's
+        current 60-step window is exhausted a fresh sequence is generated,
+        preserving temporal continuity in the rolling window accumulated by
+        the consumer.
+
         Args:
             n_sensors: Number of concurrent sensors to simulate.
             interval_s: Seconds between each full scan of all sensors.
-            inject_anomaly_every: Inject anomaly in one sensor every N steps.
+            inject_anomaly_every: Inject anomaly into sensor-0's sequence
+                every N steps (replaces its current window with an anomalous one).
             max_steps: Stop after this many steps (None = run forever).
         """
         from src.data.generator import IoTDataGenerator
 
         gen = IoTDataGenerator(n_sensors=n_sensors)
-        step = 0
 
+        # Per-sensor state: (sequence (60, n_sensors), current timestep index)
+        sensor_seqs: dict = {}
+
+        def _new_seq(sensor_id: int, anomalous: bool = False) -> np.ndarray:
+            seq = gen.generate_normal_sequence()
+            if anomalous:
+                seq = gen.inject_anomaly(seq)
+            return seq
+
+        # Initialise independent sequences per sensor to avoid correlation
+        for sid in range(n_sensors):
+            sensor_seqs[sid] = {"seq": _new_seq(sid), "t": 0}
+
+        step = 0
         print(f"\n  Simulating {n_sensors} sensors "
               f"(anomaly every {inject_anomaly_every} steps)…")
         print("  Press Ctrl+C to stop.\n")
@@ -92,17 +111,24 @@ class SensorProducer:
         try:
             while max_steps is None or step < max_steps:
                 ts = time.time()
-                for sensor_id in range(n_sensors):
-                    normal_seq = gen.generate_normal_sequence()
-                    # For the producer we send one timestep at a time
-                    values = normal_seq[0, :].tolist()
 
-                    if step % inject_anomaly_every == 0 and sensor_id == 0:
-                        anomaly_seq = gen.inject_anomaly(normal_seq)
-                        values = anomaly_seq[0, :].tolist()
-                        print(f"  💉 Injected anomaly at step={step}, sensor={sensor_id}")
+                # Inject anomaly into sensor 0's sequence every N steps
+                if step > 0 and step % inject_anomaly_every == 0:
+                    sensor_seqs[0]["seq"] = _new_seq(0, anomalous=True)
+                    sensor_seqs[0]["t"] = 0
+                    print(f"  💉 Anomalous sequence injected at step={step}, sensor=0")
+
+                for sensor_id in range(n_sensors):
+                    state = sensor_seqs[sensor_id]
+                    t_idx = state["t"]
+                    values = state["seq"][t_idx, :].tolist()
 
                     self.send_reading(sensor_id, values, timestamp=ts)
+
+                    # Advance timestep; roll over to a fresh sequence at end
+                    state["t"] += 1
+                    if state["t"] >= gen.seq_length:
+                        sensor_seqs[sensor_id] = {"seq": _new_seq(sensor_id), "t": 0}
 
                 self.producer.flush()
                 step += 1
@@ -112,6 +138,7 @@ class SensorProducer:
             print("\n  Producer stopped.")
         finally:
             self.producer.close()
+
 
 
 # ---------------------------------------------------------------------------
