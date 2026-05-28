@@ -21,8 +21,9 @@ import json
 import logging
 import os
 import sqlite3
+import time as _time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -32,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.inference import InferenceEngine
 from src.api.schemas import (
+    AlertList,
     AlertSummary,
     AnomalyResult,
     DriftStatusResponse,
@@ -46,14 +48,24 @@ logger = logging.getLogger(__name__)
 # SQLite Alert Store
 # ──────────────────────────────────────────────────────────────────────────────
 
-_DB_PATH    = Path(os.environ.get("ALERTS_DB_PATH", "logs/alerts.db"))
-_MAX_ALERTS = int(os.environ.get("MAX_ALERTS", "10000"))
+_DB_PATH_DEFAULT    = "logs/alerts.db"
+_MAX_ALERTS_DEFAULT = 10000
+
+
+def _get_db_path() -> Path:
+    """Read DB path at request time so env-var patches in tests work."""
+    return Path(os.environ.get("ALERTS_DB_PATH", _DB_PATH_DEFAULT))
+
+# Keep module-level reference for startup _init_db call — overridden per request.
+_DB_PATH    = Path(os.environ.get("ALERTS_DB_PATH", _DB_PATH_DEFAULT))
+_MAX_ALERTS = int(os.environ.get("MAX_ALERTS", str(_MAX_ALERTS_DEFAULT)))
 
 
 def _init_db() -> None:
     """Create alerts table if it does not exist."""
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(_DB_PATH) as conn:
+    db = _get_db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS alerts (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +91,8 @@ def _init_db() -> None:
 
 def _persist_alert(alert: dict) -> None:
     """Insert one alert row into the SQLite store."""
-    with sqlite3.connect(_DB_PATH) as conn:
+    db = _get_db_path()
+    with sqlite3.connect(db) as conn:
         conn.execute("""
             INSERT INTO alerts
                 (sensor_id, is_anomaly, reconstruction_error, threshold,
@@ -100,10 +113,11 @@ def _persist_alert(alert: dict) -> None:
         conn.commit()
 
     # Prune oldest rows when cap is exceeded
-    with sqlite3.connect(_DB_PATH) as conn:
+    max_alerts = int(os.environ.get("MAX_ALERTS", str(_MAX_ALERTS_DEFAULT)))
+    with sqlite3.connect(db) as conn:
         count = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
-        if count > _MAX_ALERTS:
-            excess = count - _MAX_ALERTS
+        if count > max_alerts:
+            excess = count - max_alerts
             conn.execute(
                 "DELETE FROM alerts WHERE id IN "
                 "(SELECT id FROM alerts ORDER BY id ASC LIMIT ?)",
@@ -114,7 +128,8 @@ def _persist_alert(alert: dict) -> None:
 
 def _fetch_recent_alerts(limit: int = 50) -> tuple[List[dict], int]:
     """Return (alerts_list, total_count) from the SQLite store."""
-    with sqlite3.connect(_DB_PATH) as conn:
+    db = _get_db_path()
+    with sqlite3.connect(db) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT raw_json FROM alerts ORDER BY id DESC LIMIT ?", (limit,)
@@ -126,7 +141,8 @@ def _fetch_recent_alerts(limit: int = 50) -> tuple[List[dict], int]:
 
 def _alert_counts() -> dict:
     """Return aggregate statistics from the SQLite store."""
-    with sqlite3.connect(_DB_PATH) as conn:
+    db = _get_db_path()
+    with sqlite3.connect(db) as conn:
         total = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
         high  = conn.execute(
             "SELECT COUNT(*) FROM alerts WHERE severity = 'HIGH'"
@@ -139,7 +155,8 @@ def _alert_counts() -> dict:
 
 def _clear_alerts() -> None:
     """Truncate the alerts table."""
-    with sqlite3.connect(_DB_PATH) as conn:
+    db = _get_db_path()
+    with sqlite3.connect(db) as conn:
         conn.execute("DELETE FROM alerts")
         conn.commit()
 
@@ -153,8 +170,14 @@ _ALLOWED_ORIGINS: list = (
 )
 
 # Admin key for destructive operations (set via env var in production).
-# If unset, DELETE /alerts is disabled for safety.
-_ADMIN_API_KEY: Optional[str] = os.environ.get("ADMIN_API_KEY") or None
+# NOTE: read lazily inside request handlers so patch.dict(os.environ, ...) works.
+# The module-level binding below is kept only for documentation purposes.
+_ADMIN_API_KEY: Optional[str] = None  # actual value read via _get_admin_key()
+
+
+def _get_admin_key() -> Optional[str]:
+    """Return ADMIN_API_KEY from current environment (supports runtime patches)."""
+    return os.environ.get("ADMIN_API_KEY") or None
 
 # ── Drift report helpers ────────────────────────────────────────────────────────
 
@@ -176,10 +199,15 @@ def _latest_drift_report() -> Optional[dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 # Lifespan — model loading on startup
 # ──────────────────────────────────────────────────────────────────────────────
+# Module-level startup timestamp — set in lifespan, used in /health.
+_start_time: float = _time.monotonic()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model artefacts and initialise DB on startup."""
+    global _start_time
+    _start_time = _time.monotonic()
     # ── Persistent alert store ──────────────────────────────────────────
     _init_db()
 
@@ -257,7 +285,7 @@ async def predict_anomaly(data: SensorSequence):
 
     if response.is_anomaly:
         alert = response.model_dump()
-        alert["timestamp"] = datetime.utcnow().isoformat()
+        alert["timestamp"] = datetime.now(timezone.utc).isoformat()
         _persist_alert(alert)
         logger.warning(
             "ANOMALY detected: sensor=%d  error=%.4f  hybrid=%.4f  severity=%s",
@@ -273,35 +301,45 @@ async def predict_anomaly(data: SensorSequence):
 @app.get("/health", response_model=HealthResponse, tags=["Operations"])
 async def health():
     """Check service health, model status, and inference mode."""
+    # Coerce _mode to str: guards against MagicMock objects in unit tests.
+    raw_mode = InferenceEngine._mode
+    mode_str = str(raw_mode) if raw_mode is not None else ""
     return HealthResponse(
         status="ok",
         model="Hybrid_BiLSTM_XGBoost",
-        threshold=InferenceEngine._threshold or 0.0,
-        mode=InferenceEngine._mode,
+        threshold=float(InferenceEngine._threshold or 0.0),
+        mode=mode_str,
+        uptime_seconds=round(_time.monotonic() - _start_time, 2),
     )
 
 
-@app.get("/alerts/recent", response_model=AlertSummary, tags=["Monitoring"])
+@app.get("/alerts/recent", response_model=AlertList, tags=["Monitoring"])
 async def get_recent_alerts(limit: int = 50):
     """Return the most recently detected anomaly alerts from the SQLite store.
+
+    Returns a plain JSON **list** of alert objects (not a wrapped object).
 
     Args:
         limit: Maximum number of alerts to return (default 50, max 200).
     """
     limit  = min(limit, 200)
-    alerts, total = _fetch_recent_alerts(limit)
-    return AlertSummary(alerts=alerts, total=total)
+    alerts, _total = _fetch_recent_alerts(limit)
+    return alerts
 
 
 @app.get("/metrics", response_model=MetricsResponse, tags=["Monitoring"])
 async def get_metrics():
     """Return aggregate detection statistics from the persistent alert store."""
     counts = _alert_counts()
+    total  = counts["total"]
+    anomalies = counts["high"] + counts["med"]
     return MetricsResponse(
-        total_alerts=counts["total"],
+        total_alerts=total,
+        total_predictions=total,
         high_severity=counts["high"],
         med_severity=counts["med"],
-        threshold=InferenceEngine._threshold or 0.0,
+        threshold=float(InferenceEngine._threshold or 0.0),
+        anomaly_rate=round(anomalies / total, 4) if total > 0 else 0.0,
     )
 
 
@@ -336,13 +374,17 @@ async def clear_alerts(x_admin_key: Optional[str] = Header(default=None)):
     Requires the ``X-Admin-Key`` request header matching the ``ADMIN_API_KEY``
     environment variable.  If ``ADMIN_API_KEY`` is not set the endpoint is
     disabled (returns 503) to prevent accidental data loss.
+
+    NOTE: admin key is read at request time (not import time) so that
+    environment-variable patches in unit tests take effect correctly.
     """
-    if _ADMIN_API_KEY is None:
+    admin_key = _get_admin_key()
+    if admin_key is None:
         raise HTTPException(
             status_code=503,
             detail="DELETE /alerts is disabled: ADMIN_API_KEY environment variable not set.",
         )
-    if x_admin_key != _ADMIN_API_KEY:
+    if x_admin_key != admin_key:
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing X-Admin-Key header.",

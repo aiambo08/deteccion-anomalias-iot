@@ -51,8 +51,19 @@ def client():
     Test client with a fully mocked InferenceEngine and a temporary SQLite DB.
 
     The lifespan startup is bypassed so no model files are needed on disk.
+
+    Key points:
+    * InferenceEngine class is patched so no model artefacts are needed.
+    * _threshold and _mode are set to concrete values so Pydantic schemas
+      (HealthResponse, MetricsResponse) receive real Python types, not
+      MagicMock objects which would cause ValidationError.
+    * ALERTS_DB_PATH is patched so the SQLite store is isolated in a
+      temporary directory per test run.
+    * ADMIN_API_KEY is patched so DELETE /alerts can be exercised.
     """
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors=True prevents PermissionError on Windows
+    # when the SQLite file is still locked by the OS at teardown.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         alerts_db = os.path.join(tmp, "alerts_test.db")
 
         with (
@@ -66,6 +77,11 @@ def client():
             mock_engine.predict.return_value = _make_predict_response(False)
             mock_engine_cls.load.return_value = None
             mock_engine_cls.predict.side_effect = mock_engine.predict
+
+            # Set concrete class-attribute values so Pydantic schemas
+            # receive real str / float instead of MagicMock objects.
+            mock_engine_cls._threshold = 0.025
+            mock_engine_cls._mode      = "hybrid"
 
             # Patch the module-level singleton methods used in route handlers
             with patch("src.api.main.InferenceEngine.predict",

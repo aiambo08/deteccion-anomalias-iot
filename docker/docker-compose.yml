@@ -1,4 +1,4 @@
-version: '3.8'
+# 'version' field removed — obsolete in recent Docker Compose versions
 
 services:
 
@@ -13,11 +13,12 @@ services:
       - "2181:2181"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      # zkServer.sh is bundled in the Confluent image; nc (netcat) is NOT.
+      test: ["CMD", "bash", "-c", "/usr/bin/zookeeper-shell localhost:2181 ls / > /dev/null 2>&1 || exit 1"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
 
   # ── Kafka broker ─────────────────────────────────────────────────────────
   kafka:

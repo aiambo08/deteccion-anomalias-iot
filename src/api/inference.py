@@ -19,6 +19,7 @@ import joblib
 import numpy as np
 
 from src.features.feature_pipeline import extract_advanced_features
+from src.models.trainer import safe_load_keras_model
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class InferenceEngine:
 
         # ── Autoencoder (required) ──────────────────────────────────────
         logger.info("Loading Bi-LSTM Autoencoder from %s…", model_path)
-        cls._ae_model  = tf.keras.models.load_model(model_path)
+        cls._ae_model  = safe_load_keras_model(model_path)
         cls._scaler    = joblib.load(scaler_path)
         cls._threshold = float(joblib.load(threshold_path))
         logger.info("Autoencoder ready  threshold=%.6f", cls._threshold)

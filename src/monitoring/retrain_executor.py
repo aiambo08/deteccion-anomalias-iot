@@ -251,7 +251,11 @@ def _production_roc_auc(data: dict) -> Optional[float]:
 
         prep = IoTPreprocessor()
         prep.load_scaler()
-        X_val_adv = build_feature_matrix(data["X_val"], verbose=False)
+        # BUG FIX: apply the production scaler before feature extraction.
+        # Without this, features are built on raw (unscaled) data while the
+        # model was trained on scaled data → ROC-AUC comparison is invalid.
+        X_val_scaled = prep.transform(data["X_val"])
+        X_val_adv = build_feature_matrix(X_val_scaled, verbose=False)
 
         val_proba = prod_model.predict_proba(X_val_adv)[:, 1]
         roc_auc   = float(roc_auc_score(data["y_val"], val_proba))
@@ -317,7 +321,8 @@ def _write_report(report: dict, week_label: str) -> Path:
 
 def process_retrain_flag(flag_path: Path) -> dict:
     """Handle one retrain flag file end-to-end."""
-    with flag_path.open() as fh:
+    # utf-8-sig strips the UTF-8 BOM that PowerShell / some Windows editors add.
+    with flag_path.open(encoding="utf-8-sig") as fh:
         flag = json.load(fh)
 
     week_label = flag.get("week", "UNKNOWN")

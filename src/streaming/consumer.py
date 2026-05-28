@@ -32,6 +32,7 @@ except ImportError:
     KAFKA_AVAILABLE = False
 
 from src.features.feature_pipeline import extract_advanced_features
+from src.models.trainer import safe_load_keras_model
 from src.streaming.kafka_config import (
     ALERT_TOPIC,
     BOOTSTRAP_SERVERS,
@@ -113,7 +114,7 @@ class AnomalyDetectorConsumer:
         import tensorflow as tf  # deferred import to speed up cold start
         logger.info("Loading Bi-LSTM Autoencoder from %s…", model_path)
         try:
-            self.ae_model  = tf.keras.models.load_model(model_path)
+            self.ae_model  = safe_load_keras_model(model_path)
             self.scaler    = joblib.load(scaler_path)
             self.threshold = float(joblib.load(threshold_path))
             logger.info("Autoencoder ready  threshold=%.6f", self.threshold)
